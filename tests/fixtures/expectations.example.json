@@ -1,0 +1,44 @@
+{
+  "//": "Copy to expectations.local.json (gitignored) and fill in the values that describe YOUR local uncommitted fixtures. Suites that need a section skip when it (or the assets) are missing. See tests/helpers/local.ts for the full shape.",
+  "example": {
+    "moduleName": "<module name from moduledata>",
+    "version": "<module version>",
+    "tableName": "<main map name>",
+    "tableBoards": [["<board name>", "<board image>"]],
+    "sideMaps": ["<other map names>"],
+    "sideMapBoard": ["<their board name>", "<their board image>"],
+    "pieceCount": 0,
+    "pieceName": "<name of one piece in the save>",
+    "notesContain": "<substring of the scenario note>",
+    "preservedPrefix": "<prefix of one preserved command>",
+    "boardCommand": "<the save's BoardPicker command>"
+  },
+  "complex": {
+    "dir": "public/modules/<dir>",
+    "archive": "<module file>.vmod",
+    "name": "<module name>",
+    "version": "<version>",
+    "mainMap": "<main map name>",
+    "minPrototypes": 0,
+    "minSlots": 0,
+    "chart": { "name": "<ChartWindow name>", "tabs": ["<top-level tab names>"], "chartCount": 0 },
+    "pieceWindowTooltips": ["<visible PieceWindow tooltips, in order>"],
+    "knownMissingImages": ["<image names genuinely absent from the archive>"],
+    "extensionlessRefs": ["<legacy extensionless image refs that must resolve>"],
+    "boards": [
+      {
+        "file": "boards/<archive>",
+        "name": "<board name>",
+        "image": "<board image entry>",
+        "widthHexes": 0,
+        "heightHexes": 0,
+        "locations": [[0, 0, "<hex label at (x,y)>"]]
+      }
+    ]
+  },
+  "legacySave": {
+    "boardImage": "<board key the save selects>",
+    "pieces": 0,
+    "scenarioContains": "<substring of the scenario note>"
+  }
+}

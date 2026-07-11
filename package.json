@@ -1,0 +1,32 @@
+{
+  "name": "vassal-browser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-native (incl. iOS) player for VASSAL modules — a JS interpreter of the .vmod module format.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify:smoke": "npm run build && node scripts/verify-smoke.mjs",
+    "verify:scenario": "npm run build && node scripts/verify-scenario.mjs",
+    "verify:grid": "npm run build && node scripts/verify-grid.mjs",
+    "verify": "npm run verify:smoke && npm run verify:scenario && npm run verify:grid",
+    "boards:manifest": "node scripts/gen-boards-manifest.mjs",
+    "presets": "node scripts/gen-presets.mjs"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "jsdom": "^29.1.1",
+    "playwright": "^1.61.1",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0",
+    "vitest": "^2.1.0"
+  }
+}
