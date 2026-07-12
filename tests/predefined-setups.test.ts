@@ -43,7 +43,7 @@ describe("predefined setup board layouts", () => {
 
     applyPredefinedSetupBoards(
       maps,
-      [{ name: "4x4 Meadow", file: "4x4Meadow.vsav", isMenu: false, useFile: true }],
+      [{ name: "4x4 Meadow", file: "4x4Meadow.vsav", isMenu: false, useFile: true, menu: [] }],
       archive,
     );
 

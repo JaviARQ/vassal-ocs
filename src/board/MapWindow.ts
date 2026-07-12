@@ -1,5 +1,5 @@
 import type { GamePiece } from "../model/piece";
-import { boardKey, cssColor, type BoardDef, type LosThreadDef, type SlotCategory } from "../vmod/buildfile";
+import { boardKey, cssColor, type BoardDef, type LosThreadDef, type SlotCategory, type StackMetricsDef } from "../vmod/buildfile";
 import type { HexGridModel } from "../vmod/hexgrid";
 import type { ImageStore } from "./images";
 import { drawPiece, drawSelection, hitTestPiece, pieceHalfExtent, segmentIntersectsPiece } from "./render";
@@ -89,6 +89,9 @@ export class MapWindow {
 
   private losScale = 0;
   private losThread: LosThreadDef | null = null;
+  private stackMetrics: StackMetricsDef | null = null;
+  /** Map edge buffer: boards + board-relative grids anchor here. */
+  private boardOrigin = { x: 0, y: 0 };
   private hexGrid: HexGridModel | null = null;
   private dragStartLocs = new Map<GamePiece, string>();
   private measureMode = false;
@@ -138,6 +141,46 @@ export class MapWindow {
     this.losScale = def?.scale ?? 0;
   }
 
+  /** Adopt the map's StackMetrics (visual cascade for co-located pieces). */
+  setStackMetrics(def: StackMetricsDef | null): void {
+    this.stackMetrics = def;
+    this.requestDraw();
+  }
+
+  /** Map edge buffer (Map.setBoardBoundaries board translate). */
+  setBoardOrigin(x: number, y: number): void {
+    this.boardOrigin = { x, y };
+    this.requestDraw();
+  }
+
+  /** World position of a named grid location (board-relative grid + origin). */
+  hexCenter(hex: string): { x: number; y: number } | null {
+    if (!this.hexGrid) return null;
+    const p = this.hexGrid.getLocation(hex);
+    return { x: p.x + this.boardOrigin.x, y: p.y + this.boardOrigin.y };
+  }
+
+  /**
+   * Visual cascade offsets: pieces sharing an exact position draw shifted
+   * up-right per index (StackMetrics unexpanded separation), so stacks read
+   * as stacks. Logical positions/hit-testing are untouched (cycleHit
+   * disambiguates overlaps).
+   */
+  private stackOffsets(pieces: GamePiece[]): Map<GamePiece, { ox: number; oy: number }> {
+    const out = new Map<GamePiece, { ox: number; oy: number }>();
+    if (this.stackMetrics?.disabled) return out;
+    const sepX = this.stackMetrics?.unexSepX ?? 2;
+    const sepY = this.stackMetrics?.unexSepY ?? 4;
+    const counts = new Map<string, number>();
+    for (const p of pieces) {
+      const key = `${Math.round(p.x)}:${Math.round(p.y)}`;
+      const i = counts.get(key) ?? 0;
+      counts.set(key, i + 1);
+      if (i > 0) out.set(p, { ox: i * sepX, oy: -i * sepY });
+    }
+    return out;
+  }
+
   /** Hex grid of the current board; enables snapping + hex locations. */
   setGrid(grid: HexGridModel | null): void {
     this.hexGrid = grid;
@@ -150,12 +193,15 @@ export class MapWindow {
 
   /** Grid location name of a piece ("F5"), or null without a grid. */
   locationOf(piece: GamePiece): string | null {
-    return this.hexGrid ? this.hexGrid.locationName(piece.x, piece.y) : null;
+    if (!this.hexGrid) return null;
+    return this.hexGrid.locationName(piece.x - this.boardOrigin.x, piece.y - this.boardOrigin.y);
   }
 
   /** Snap a world point to the grid (Map.snapTo); identity without a grid. */
   snap(x: number, y: number): { x: number; y: number } {
-    return this.hexGrid ? this.hexGrid.snapToHex(x, y) : { x, y };
+    if (!this.hexGrid) return { x, y };
+    const s = this.hexGrid.snapToHex(x - this.boardOrigin.x, y - this.boardOrigin.y);
+    return { x: s.x + this.boardOrigin.x, y: s.y + this.boardOrigin.y };
   }
 
   setInteractionLayer(layer: InteractionLayer): void {
@@ -219,7 +265,8 @@ export class MapWindow {
     const len = Math.hypot(m.ex - m.sx, m.ey - m.sy);
     const blocked = this.losBlocked(m.sx, m.sy, m.ex, m.ey);
     if (this.hexGrid) {
-      return { distance: this.hexGrid.range(m.sx, m.sy, m.ex, m.ey), unit: "hexes", blocked };
+      const { x: ox, y: oy } = this.boardOrigin;
+      return { distance: this.hexGrid.range(m.sx - ox, m.sy - oy, m.ex - ox, m.ey - oy), unit: "hexes", blocked };
     }
     return this.losScale > 0
       ? { distance: this.scaledRange(len), unit: "in", blocked }
@@ -237,7 +284,7 @@ export class MapWindow {
   /** Snap a thread endpoint to the grid when the module declared snapping. */
   private snapThreadPoint(x: number, y: number, isStart: boolean): { x: number; y: number } {
     const snap = isStart ? this.losThread?.snapStart : this.losThread?.snapEnd;
-    if (snap && this.hexGrid) return this.hexGrid.snapToHex(x, y);
+    if (snap && this.hexGrid) return this.snap(x, y);
     return { x, y };
   }
 
@@ -264,7 +311,7 @@ export class MapWindow {
   }
 
   addPiece(piece: GamePiece, select = true): void {
-    const snapped = this.snap(piece.x, piece.y);
+    const snapped = piece.ignoresGrid() ? { x: piece.x, y: piece.y } : this.snap(piece.x, piece.y);
     piece.x = snapped.x;
     piece.y = snapped.y;
     piece.trailStart = { x: piece.x, y: piece.y };
@@ -476,8 +523,12 @@ export class MapWindow {
     maxW: number,
     maxH: number,
   ): { scale: number; width: number; height: number } | null {
-    const size = this.boardWorldSize();
-    if (!size || size.width <= 0 || size.height <= 0) return null;
+    const board = this.boardWorldSize();
+    if (!board || board.width <= 0 || board.height <= 0) return null;
+    const size = {
+      width: board.width + this.boardOrigin.x * 2,
+      height: board.height + this.boardOrigin.y * 2,
+    };
     const scale = Math.min(maxW / size.width, maxH / size.height);
     ctx.save();
     ctx.scale(scale, scale);
@@ -522,12 +573,17 @@ export class MapWindow {
     this.drawDecks(ctx);
 
     this.drawMovementTrails(ctx);
-    for (const p of this.visiblePieces()) {
-      drawPiece(ctx, p, this.images, { pieceScale: this.pieceScale });
+    const visible = this.visiblePieces();
+    const offsets = this.stackOffsets(visible);
+    const redraw = () => this.requestDraw();
+    for (const p of visible) {
+      const off = offsets.get(p);
+      drawPiece(ctx, p, this.images, { pieceScale: this.pieceScale, ox: off?.ox, oy: off?.oy, redraw });
     }
     for (const p of this.getSelectedPieces()) {
       this.drawHexHighlight(ctx, p);
-      drawSelection(ctx, p, this.images, { pieceScale: this.pieceScale });
+      const off = offsets.get(p);
+      drawSelection(ctx, p, this.images, { pieceScale: this.pieceScale, ox: off?.ox, oy: off?.oy });
     }
     if (this.marquee) this.drawMarquee(ctx);
     if (this.measure) this.drawMeasure(ctx, dpr);
@@ -537,8 +593,9 @@ export class MapWindow {
   /** Outline the selected piece's hex (hex-grid selection cue). */
   private drawHexHighlight(ctx: CanvasRenderingContext2D, piece: GamePiece): void {
     if (!this.hexGrid) return;
-    const c = this.hexGrid.snapToHex(piece.x, piece.y);
-    const poly = this.hexGrid.hexPolygon(c.x, c.y);
+    const { x: ox, y: oy } = this.boardOrigin;
+    const c = this.hexGrid.snapToHex(piece.x - ox, piece.y - oy);
+    const poly = this.hexGrid.hexPolygon(c.x, c.y).map((p) => ({ x: p.x + ox, y: p.y + oy }));
     ctx.save();
     ctx.strokeStyle = "rgba(255, 207, 51, 0.9)";
     ctx.lineWidth = 2 / this.cam.scale;
@@ -643,8 +700,9 @@ export class MapWindow {
 
     // Label in screen space so it stays legible at any zoom.
     const lenWorld = Math.hypot(m.ex - m.sx, m.ey - m.sy);
+    const { x: mox, y: moy } = this.boardOrigin;
     const label = this.hexGrid
-      ? `Range: ${this.hexGrid.range(m.sx, m.sy, m.ex, m.ey)}${blocked ? " • blocked" : ""}`
+      ? `Range: ${this.hexGrid.range(m.sx - mox, m.sy - moy, m.ex - mox, m.ey - moy)}${blocked ? " • blocked" : ""}`
       : this.losScale > 0
         ? `${this.scaledRange(lenWorld)}"${blocked ? " • blocked" : ""}`
         : `${Math.round(lenWorld)}px${blocked ? " • blocked" : ""}`;
@@ -734,8 +792,8 @@ export class MapWindow {
     if (size && size.width > 0 && size.height > 0) {
       const scale = Math.min(r.width / size.width, r.height / size.height) * 0.95;
       this.cam.scale = scale || 1;
-      this.cam.tx = (r.width - size.width * this.cam.scale) / 2;
-      this.cam.ty = (r.height - size.height * this.cam.scale) / 2;
+      this.cam.tx = (r.width - size.width * this.cam.scale) / 2 - this.boardOrigin.x * this.cam.scale;
+      this.cam.ty = (r.height - size.height * this.cam.scale) / 2 - this.boardOrigin.y * this.cam.scale;
     } else if (this.boardImage) {
       // board not loaded yet; retry shortly
       setTimeout(() => this.fitBoard(), 100);
@@ -747,12 +805,33 @@ export class MapWindow {
   }
 
   private drawBoard(ctx: CanvasRenderingContext2D): void {
+    ctx.save();
+    ctx.translate(this.boardOrigin.x, this.boardOrigin.y);
+    try {
+      this.drawBoardContent(ctx);
+    } finally {
+      ctx.restore();
+    }
+  }
+
+  private drawBoardContent(ctx: CanvasRenderingContext2D): void {
     const boardDef = this.currentBoardDef();
     if (boardDef?.tiles?.length) {
       const layout = this.boardLayout(boardDef);
       if (!layout) return;
       for (const tile of layout.tiles) {
-        if (tile.image.loaded) ctx.drawImage(tile.image.img, tile.x, tile.y);
+        const sx = tile.crop?.x ?? 0;
+        const sy = tile.crop?.y ?? 0;
+        ctx.save();
+        if (tile.reversed) {
+          // ASLBoard reversal: the tile draws rotated 180° in place.
+          ctx.translate(tile.x + tile.w / 2, tile.y + tile.h / 2);
+          ctx.rotate(Math.PI);
+          ctx.drawImage(tile.image.img, sx, sy, tile.w, tile.h, -tile.w / 2, -tile.h / 2, tile.w, tile.h);
+        } else {
+          ctx.drawImage(tile.image.img, sx, sy, tile.w, tile.h, tile.x, tile.y, tile.w, tile.h);
+        }
+        ctx.restore();
       }
       return;
     }
@@ -760,7 +839,14 @@ export class MapWindow {
     const imageName = boardDef?.image || this.boardImage;
     const board = this.images.get(imageName);
     if (board && board.loaded) {
-      ctx.drawImage(board.img, 0, 0);
+      const crop = boardDef?.crop;
+      if (crop) {
+        const cw = crop.width > 0 ? Math.min(crop.width, board.width - crop.x) : board.width - crop.x;
+        const ch = crop.height > 0 ? Math.min(crop.height, board.height - crop.y) : board.height - crop.y;
+        ctx.drawImage(board.img, crop.x, crop.y, cw, ch, 0, 0, cw, ch);
+      } else {
+        ctx.drawImage(board.img, 0, 0);
+      }
       return;
     }
 
@@ -777,7 +863,13 @@ export class MapWindow {
     if (boardDef?.tiles?.length) return this.boardLayout(boardDef);
     const imageName = boardDef?.image || this.boardImage;
     const board = this.images.get(imageName);
-    if (board && board.loaded) return { width: board.width, height: board.height };
+    if (board && board.loaded) {
+      const crop = boardDef?.crop;
+      return {
+        width: crop && crop.width > 0 ? Math.min(crop.width, board.width) : board.width,
+        height: crop && crop.height > 0 ? Math.min(crop.height, board.height) : board.height,
+      };
+    }
     if (boardDef?.width && boardDef.height) return { width: boardDef.width, height: boardDef.height };
     return null;
   }
@@ -796,6 +888,7 @@ export class MapWindow {
     if (!def.visible && !numbering?.visible) return;
 
     ctx.save();
+    ctx.translate(this.boardOrigin.x, this.boardOrigin.y);
     ctx.beginPath();
     ctx.rect(0, 0, size.width, size.height);
     ctx.clip();
@@ -841,21 +934,40 @@ export class MapWindow {
   private boardLayout(boardDef: BoardDef): {
     width: number;
     height: number;
-    tiles: Array<{ image: NonNullable<ReturnType<ImageStore["get"]>>; x: number; y: number }>;
+    tiles: Array<{
+      image: NonNullable<ReturnType<ImageStore["get"]>>;
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+      reversed: boolean;
+      crop?: { x: number; y: number; width: number; height: number };
+    }>;
   } | null {
     const loaded = boardDef.tiles?.map((tile) => ({ tile, image: this.images.get(tile.image) })).filter((t) => t.image) ?? [];
     if (!loaded.length || loaded.some((t) => !t.image!.loaded)) return null;
 
-    const cellWidth = Math.max(...loaded.map((t) => t.image!.width));
-    const cellHeight = Math.max(...loaded.map((t) => t.image!.height));
-    const tiles = loaded.map(({ tile, image }) => ({
+    // Cropped tiles occupy their cropped footprint; cells size to the largest.
+    const sized = loaded.map(({ tile, image }) => ({
+      tile,
       image: image!,
+      w: tile.crop && tile.crop.width > 0 ? Math.min(tile.crop.width, image!.width) : image!.width,
+      h: tile.crop && tile.crop.height > 0 ? Math.min(tile.crop.height, image!.height) : image!.height,
+    }));
+    const cellWidth = Math.max(...sized.map((t) => t.w));
+    const cellHeight = Math.max(...sized.map((t) => t.h));
+    const tiles = sized.map(({ tile, image, w, h }) => ({
+      image,
       x: tile.x * cellWidth,
       y: tile.y * cellHeight,
+      w,
+      h,
+      reversed: !!tile.reversed,
+      crop: tile.crop,
     }));
     return {
-      width: Math.max(...tiles.map((t) => t.x + t.image.width)),
-      height: Math.max(...tiles.map((t) => t.y + t.image.height)),
+      width: Math.max(...tiles.map((t) => t.x + t.w)),
+      height: Math.max(...tiles.map((t) => t.y + t.h)),
       tiles,
     };
   }
@@ -903,11 +1015,15 @@ export class MapWindow {
     if (this.interactionLayer === "map") return [];
     const ordered = this.zSorted();
     const hits: GamePiece[] = [];
+    const fallback: GamePiece[] = [];
     for (let i = ordered.length - 1; i >= 0; i--) {
-      if (!this.matchesInteractionLayer(ordered[i])) continue;
-      if (hitTestPiece(ordered[i], wx, wy, this.images, this.pieceScale)) hits.push(ordered[i]);
+      if (!hitTestPiece(ordered[i], wx, wy, this.images, this.pieceScale)) continue;
+      (this.matchesInteractionLayer(ordered[i]) ? hits : fallback).push(ordered[i]);
     }
-    return hits;
+    // The edit focus is a priority, not a wall: with nothing from the focused
+    // layer under the pointer, pick from the other layers so terrain and
+    // game aids stay directly grabbable (focused pieces still win overlaps).
+    return hits.length ? hits : fallback;
   }
 
   private cycleHit(hits: GamePiece[], e: PointerEvent): GamePiece | null {
@@ -1077,7 +1193,7 @@ export class MapWindow {
     this.pointers.delete(e.pointerId);
     if (this.mode === "drag" && this.dragPieces.length) {
       for (const piece of this.dragPieces) {
-        const snapped = this.snap(piece.x, piece.y);
+        const snapped = piece.ignoresGrid() ? { x: piece.x, y: piece.y } : this.snap(piece.x, piece.y);
         piece.x = snapped.x;
         piece.y = snapped.y;
         const from = this.dragStartLocs.get(piece);
@@ -1269,6 +1385,9 @@ export class MapWindow {
 }
 
 function classifyPiece(piece: GamePiece): SlotCategory {
+  // Scenario cards / rule aids (HTML labels) sit under the counters that
+  // play on top of them, whatever their provenance.
+  if (piece.hasHtmlLabel()) return "aids";
   if (piece.paletteCategory) return piece.paletteCategory;
   const layer = piece.layerName();
   if (layer) {

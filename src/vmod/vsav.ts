@@ -37,6 +37,8 @@ export interface ParsedBoardPickerCommand {
 
 /** One board of an ASLBoardPicker `bd` command (grid cell, not pixels). */
 export interface BoardPickerTile {
+  /** ASLBoard crop bounds (x1,y1,x2,y2; -1 = unbounded), when present. */
+  crop?: { x1: number; y1: number; x2: number; y2: number };
   col: number;
   row: number;
   boardName: string;
@@ -135,7 +137,7 @@ export function importVassalSaveText(
     if (bdTiles) {
       // Consumed only when a board applied; otherwise keep the original
       // command so a re-save doesn't lose the layout.
-      if (!applyBdBoardCommand(mapStates, model.maps, bdTiles)) preservedCommands.push(command);
+      if (!applyBdBoardCommand(mapStates, model.maps, bdTiles, command)) preservedCommands.push(command);
       continue;
     }
 
@@ -283,7 +285,12 @@ export function parseBdBoardCommand(command: string): BoardPickerTile[] | null {
       boardName = boardName.substring(1);
       reversed = true;
     }
-    tiles.push({ col, row, boardName, reversed });
+    // Optional crop bounds follow the name: x1 y1 x2 y2 (-1 = unbounded).
+    const nums = f.slice(3, 7).map((t) => Number.parseInt(t, 10));
+    const crop = nums.length === 4 && nums.every((n) => Number.isFinite(n))
+      ? { x1: nums[0], y1: nums[1], x2: nums[2], y2: nums[3] }
+      : undefined;
+    tiles.push({ col, row, boardName, reversed, ...(crop ? { crop } : {}) });
   }
   return tiles.length ? tiles : null;
 }
@@ -333,14 +340,65 @@ export function replaceBasicPieceState(stateChain: string, next: BasicPieceRunti
  * filler margins around the play area); the full multi-board layout is a known
  * simplification.
  */
-function applyBdBoardCommand(mapStates: Map<string, MapImportState>, maps: MapDef[], tiles: BoardPickerTile[]): boolean {
+function applyBdBoardCommand(
+  mapStates: Map<string, MapImportState>,
+  maps: MapDef[],
+  tiles: BoardPickerTile[],
+  command?: string,
+): boolean {
   const map = maps.find((m) => m.boards.some((b) => b.archiveFile != null)) ?? maps[0];
   if (!map) return false;
-  const primary = tiles.find((t) => !/^blank/i.test(t.boardName)) ?? tiles[0];
-  const board = map.boards.find((b) => b.name === primary.boardName);
-  if (!board) return false;
+  // Blank boards are pure layout fillers: they occupy grid cells (so other
+  // tiles keep their positions) but draw nothing.
+  const real = tiles
+    .filter((t) => !/^blank/i.test(t.boardName))
+    .map((t) => ({ t, src: map.boards.find((b) => b.name === t.boardName) }))
+    .filter((r): r is { t: BoardPickerTile; src: BoardDef } => r.src != null);
+  if (!real.length) return false;
+
+  if (real.length === 1) {
+    // Single real board: select it directly, with its crop applied.
+    const { t, src } = real[0];
+    const c = cropRect(t);
+    if (c) src.crop = c;
+    src.bdCommand = command;
+    stateFor(mapStates, map.name).boardImage = boardKey(src);
+    return true;
+  }
+
+  // Multi-board layout: a composed board of lazily-loaded tiles at their
+  // (col,row) cells — same machinery as stock BoardPicker composed setups.
+  const id = "bd:" + real.map(({ t }) => `${t.col},${t.row},${t.reversed ? "r" : ""}${t.boardName}`).join("+");
+  let board = map.boards.find((b) => b.id === id);
+  if (!board) {
+    board = {
+      id,
+      name: real.map(({ t }) => (t.reversed ? "r" : "") + t.boardName).join("+"),
+      image: "",
+      reversible: false,
+      tiles: real.map(({ t, src }) => ({
+        boardName: t.boardName,
+        image: src.image || "",
+        x: t.col,
+        y: t.row,
+        ...(t.reversed ? { reversed: true } : {}),
+        ...(cropRect(t) ? { crop: cropRect(t)! } : {}),
+        ...(src.archiveFile ? { archiveFile: src.archiveFile } : {}),
+      })),
+    };
+    map.boards.push(board);
+  }
+  board.bdCommand = command;
   stateFor(mapStates, map.name).boardImage = boardKey(board);
   return true;
+}
+
+/** Origin-anchored crop from a bd descriptor; moved-origin crops are ignored
+ *  (they'd shift grid alignment). */
+function cropRect(t: BoardPickerTile): { x: number; y: number; width: number; height: number } | null {
+  const c = t.crop;
+  if (!c || c.x1 !== 0 || c.y1 !== 0 || (c.x2 <= 0 && c.y2 <= 0)) return null;
+  return { x: 0, y: 0, width: c.x2 > 0 ? c.x2 : 0, height: c.y2 > 0 ? c.y2 : 0 };
 }
 
 function applyBoardPicker(mapStates: Map<string, MapImportState>, maps: MapDef[], parsed: ParsedBoardPickerCommand): void {
@@ -417,9 +475,14 @@ function encodeBoardPicker(map: MapDef, boardImage: string): string | null {
   if (!board) return null;
   // Board-archive modules restore boards through ASLBoardPicker, which only decodes its own
   // `bd` format (ASLBoard.getState) — a stock BoardPicker command would be
-  // ignored by the jar. No crop/VER: Java defaults to uncropped and only
-  // warns on a version mismatch.
+  // ignored by the jar. Layouts that came from a save re-emit the original
+  // command verbatim (crop/VER/overlay tokens survive); a manually picked
+  // board emits the minimal form (Java defaults to uncropped).
+  if (board.bdCommand) return board.bdCommand;
   if (board.archiveFile) return `bd\t0\t0\t${board.name}\t`;
+  if (board.id?.startsWith("bd:") && board.tiles?.length) {
+    return "bd\t" + board.tiles.map((t) => `${t.x}\t${t.y}\t${t.reversed ? "r" : ""}${t.boardName}\t`).join("bd\t");
+  }
   const enc = new SequenceEncoder("\t", `${map.name}BoardPicker`);
   const tiles = board.tiles?.length ? board.tiles : [{ boardName: board.name, x: 0, y: 0 }];
   for (const tile of tiles) {
@@ -474,6 +537,7 @@ function removePieceFromStates(piece: GamePiece, states: Map<string, MapImportSt
 }
 
 function classifyImportedPiece(piece: GamePiece): SlotCategory {
+  if (piece.hasHtmlLabel()) return "aids";
   const layer = piece.layerName();
   if (layer && /terrain|obstruction|building/i.test(layer)) return "terrain";
   if (/(deck|card|objective|victory|deployment)/i.test(piece.name())) return "aids";

@@ -44,6 +44,7 @@ function boardExtension(boards: MapDef["boards"]): ExtensionModel {
     grafts: [],
     boardGrafts: [{ target: "VASSAL.build.module.Map:Table/VASSAL.build.module.map.BoardPicker", mapName: "Table", boards }],
     prototypes: new Map(),
+    predefinedSetups: [],
   };
 }
 

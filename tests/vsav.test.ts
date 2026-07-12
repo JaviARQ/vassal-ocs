@@ -86,6 +86,7 @@ function fixtureModel(): ModuleModel {
     maps: [tableMap(), ...EXP!.sideMaps.map((name) => emptyMap(name))],
     diceButtons: [],
     predefinedSetups: [],
+    globalProperties: new Map(),
     palette: null,
     prototypes: new Map(),
     toolbar: [],

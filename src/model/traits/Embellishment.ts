@@ -26,6 +26,8 @@ export class Embellishment implements Trait {
   private downKey: KeyStroke | null = null;
   private alwaysActive = false;
   private firstLevel = 1;
+  /** Layer name: exposes $name_Level$/_Active/_Name/_Image properties. */
+  private name = "";
   /** drawUnderneathWhenSelected: excluded from the piece's hit/selection shape
    *  (Java Embellishment.getShape skips these layers). */
   private underneath = false;
@@ -53,7 +55,7 @@ export class Embellishment implements Trait {
     this.images = st.nextStringArray(1);
     this.levelNames = st.nextStringArray(this.images.length);
     this.loop = st.nextBoolean(true);
-    st.nextTokenOr(""); // name
+    this.name = st.nextTokenOr("");
     st.nextTokenOr(""); // rndKey
     st.nextTokenOr(""); // rndText
     st.nextBoolean(false); // followProperty
@@ -118,6 +120,13 @@ export class Embellishment implements Trait {
       const idx = this.level() - 1;
       return this.isActive() ? this.levelNames[idx] ?? "" : "";
     }
+    // Java Embellishment property surface: <name>_Image/_Name/_Level/_Active.
+    if (key === this.name + "_Image") return this.value > 0 ? this.images[this.value - 1] ?? "" : "";
+    if (key === this.name + "_Name") {
+      return this.value > 0 ? stripNameMarker(this.levelNames[this.value - 1] ?? "") : "";
+    }
+    if (key === this.name + "_Level") return String(this.value);
+    if (key === this.name + "_Active") return String(this.isActive());
     return null;
   }
 
@@ -167,4 +176,9 @@ export class Embellishment implements Trait {
     }
     return out;
   }
+}
+
+/** Level names carry a +prefix/+suffix marker char; the property strips it. */
+function stripNameMarker(levelName: string): string {
+  return levelName.startsWith("+") ? levelName.substring(1) : levelName;
 }

@@ -2,20 +2,27 @@ import { SequenceDecoder } from "../../vmod/sequence";
 import type { Trait } from "../piece";
 
 /**
- * `immob;<selectionOptions>` — movement/selection constraints. We only need
- * `neverMove` ('V'), which pins terrain in place (the module's "lock").
+ * `immob;<selection>;<movement>;<stacking>` — movement/selection constraints
+ * (VASSAL/counters/Immobilized.java). Selection chars: 'i' shift-to-select,
+ * 'n' never select (implies never move), 'g' ignore the map grid. Movement
+ * char 'V' = never move (pins terrain — the module's "lock").
  */
 export class Immobilized implements Trait {
   readonly id = "immob;";
   private neverMove = false;
+  private ignoreGrid = false;
   private state = "";
 
   constructor(type: string) {
     const st = new SequenceDecoder(type.substring(this.id.length), ";");
-    // Legacy first token is a movement flag char; the modern form is a string
-    // of option chars. Either way, presence of 'V' means never-move.
-    const opts = st.getRemaining() + st.nextTokenOr("");
-    this.neverMove = opts.indexOf("V") >= 0;
+    const selection = st.nextTokenOr("");
+    const movement = st.nextTokenOr("");
+    this.neverMove = selection.includes("n") || movement.includes("V");
+    this.ignoreGrid = selection.includes("g");
+  }
+
+  ignoresGrid(): boolean {
+    return this.ignoreGrid;
   }
 
   setState(s: string): void {

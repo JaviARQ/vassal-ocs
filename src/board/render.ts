@@ -1,5 +1,6 @@
-import type { GamePiece } from "../model/piece";
+import type { GamePiece, LabelPlacement } from "../model/piece";
 import type { ImageStore } from "./images";
+import { htmlLabelImage } from "./html-label";
 
 export interface PieceBounds {
   hw: number;
@@ -8,6 +9,11 @@ export interface PieceBounds {
 
 export interface RenderOptions {
   pieceScale?: number;
+  /** Visual draw offset (stack cascade); logical position stays piece.x/y. */
+  ox?: number;
+  oy?: number;
+  /** Called when an async label/image finishes and a repaint is needed. */
+  redraw?: () => void;
 }
 
 /**
@@ -24,7 +30,7 @@ export function drawPiece(ctx: CanvasRenderingContext2D, piece: GamePiece, image
   const base = images.get(baseName);
   const layers = piece.activeLayers();
   ctx.save();
-  ctx.translate(piece.x, piece.y);
+  ctx.translate(piece.x + (opts.ox ?? 0), piece.y + (opts.oy ?? 0));
   const deg = piece.rotationDegrees();
   if (deg) ctx.rotate((-deg * Math.PI) / 180);
 
@@ -57,26 +63,83 @@ export function drawPiece(ctx: CanvasRenderingContext2D, piece: GamePiece, image
 
   ctx.restore();
 
-  // Labels are drawn unrotated, just below the piece.
-  const labels = piece.labels();
-  if (labels.length) {
+  // Labels are drawn unrotated, anchored per the trait's own placement fields
+  // (Java Labeler.getLabelPosition). Swing-HTML labels (scenario cards, rule
+  // aids) rasterize to real HTML — see html-label.ts; plain text is the
+  // fallback while an image is pending or when rasterization failed.
+  const views = piece.labelViews();
+  if (views.length) {
     ctx.save();
-    ctx.translate(piece.x, piece.y);
+    ctx.translate(piece.x + (opts.ox ?? 0), piece.y + (opts.oy ?? 0));
     ctx.font = "12px sans-serif";
-    ctx.textAlign = "center";
+    ctx.textAlign = "left";
     ctx.textBaseline = "top";
-    const bh = pieceHalfExtent(piece, images, pieceScale).hh;
-    let y = bh + 2;
-    for (const text of labels.flatMap((t) => t.split("\n"))) {
-      const w = ctx.measureText(text).width;
-      ctx.fillStyle = "rgba(0,0,0,0.7)";
-      ctx.fillRect(-w / 2 - 2, y - 1, w + 4, 14);
-      ctx.fillStyle = "#fff";
-      ctx.fillText(text, 0, y);
-      y += 15;
+    const { hw, hh } = pieceShapeHalfExtent(piece, images, pieceScale);
+    let stackY = pieceHalfExtent(piece, images, pieceScale).hh + 2;
+    for (const view of views) {
+      if (view.html) {
+        const entry = htmlLabelImage(view.html, opts.redraw);
+        if (entry) {
+          if (entry.ready) {
+            const a = labelTopLeft(view.placement, hw, hh, entry.width, entry.height, stackY);
+            ctx.drawImage(entry.img, a.x, a.y);
+            if (!view.placement) stackY += entry.height + 4;
+          }
+          continue; // pending: opts.redraw fires when the image is ready
+        }
+      }
+      if (!view.text) continue;
+      // Table labels are short strings; some modules stash whole documents in
+      // a label. Clamp so a degraded fallback never smears the canvas.
+      const lines = view.text
+        .split("\n")
+        .slice(0, 6)
+        .map((t) => (t.length > 60 ? t.slice(0, 59) + "…" : t));
+      const lw = Math.max(1, ...lines.map((t) => ctx.measureText(t).width));
+      const lh = lines.length * 15;
+      const a = labelTopLeft(view.placement, hw, hh, lw, lh, stackY);
+      let ty = a.y;
+      for (const text of lines) {
+        const w = ctx.measureText(text).width;
+        const tx = a.x + (lw - w) / 2;
+        ctx.fillStyle = "rgba(0,0,0,0.7)";
+        ctx.fillRect(tx - 2, ty - 1, w + 4, 14);
+        ctx.fillStyle = "#fff";
+        ctx.fillText(text, tx, ty);
+        ty += 15;
+      }
+      if (!view.placement) stackY += lh + 2;
     }
     ctx.restore();
   }
+}
+
+/**
+ * Top-left corner of a label box relative to the piece center — the Java
+ * Labeler.getLabelPosition math over the piece's shape bounds. A null
+ * placement stacks the label centered below the piece (legacy behavior for
+ * traits without placement data, e.g. TextInfo).
+ */
+export function labelTopLeft(
+  pl: LabelPlacement | null,
+  hw: number,
+  hh: number,
+  lw: number,
+  lh: number,
+  fallbackY: number,
+): { x: number; y: number } {
+  if (!pl) return { x: -lw / 2, y: fallbackY };
+  let x = pl.hOff;
+  let y = pl.vOff;
+  if (pl.vPos === "t") y -= hh;
+  else if (pl.vPos === "b") y += hh;
+  if (pl.hPos === "l") x -= hw;
+  else if (pl.hPos === "r") x += hw;
+  if (pl.vJust === "b") y -= lh;
+  else if (pl.vJust === "c") y -= lh / 2;
+  if (pl.hJust === "c") x -= lw / 2;
+  else if (pl.hJust === "r") x -= lw;
+  return { x, y };
 }
 
 /** Half-extents (in world units) of the full visible piece footprint. */
@@ -149,6 +212,19 @@ export function hitTestPiece(piece: GamePiece, wx: number, wy: number, images: I
     ly = dx * sin + dy * cos;
   }
   const { hw, hh } = pieceShapeHalfExtent(piece, images, pieceScale);
+
+  // HTML labels (scenario cards / rule aids) are grabbable: their anchor
+  // counters are tiny, so we deliberately exceed Java's shape here (labels
+  // are drawn unrotated, so test in world offsets).
+  for (const view of piece.labelViews()) {
+    if (!view.html) continue;
+    const entry = htmlLabelImage(view.html);
+    if (!entry?.ready) continue;
+    const fallbackY = pieceHalfExtent(piece, images, pieceScale).hh + 2;
+    const a = labelTopLeft(view.placement, hw, hh, entry.width, entry.height, fallbackY);
+    if (dx >= a.x && dx <= a.x + entry.width && dy >= a.y && dy <= a.y + entry.height) return true;
+  }
+
   if (Math.abs(lx) > hw || Math.abs(ly) > hh) return false;
 
   let sawMask = false;
@@ -240,7 +316,7 @@ function liangBarsky(x1: number, y1: number, x2: number, y2: number, xmin: numbe
 export function drawSelection(ctx: CanvasRenderingContext2D, piece: GamePiece, images: ImageStore, opts: RenderOptions = {}): void {
   const { hw, hh } = pieceShapeHalfExtent(piece, images, opts.pieceScale ?? 1);
   ctx.save();
-  ctx.translate(piece.x, piece.y);
+  ctx.translate(piece.x + (opts.ox ?? 0), piece.y + (opts.oy ?? 0));
   const deg = piece.rotationDegrees();
   if (deg) ctx.rotate((-deg * Math.PI) / 180);
   ctx.strokeStyle = "#ffcf33";

@@ -9,6 +9,8 @@ import { buildPiece, setPrototypes } from "./vmod/piece-type";
 import { parseBoardArchive } from "./vmod/board-archive";
 import { archiveKind, buildFileEntry, expandBundle, type BundleBoard } from "./vmod/bundle";
 import { drawFromDeck, instantiateDecks, shuffleDeck, type DeckState } from "./model/deck";
+import { setGlobalProperties } from "./model/globals";
+import { htmlLabelImage } from "./board/html-label";
 import { HexGridModel } from "./vmod/hexgrid";
 import { readVassalSave, writeVassalSave, type MapImportState } from "./vmod/vsav";
 import { ImageStore, type ImageSource } from "./board/images";
@@ -162,6 +164,7 @@ class App {
         const ext = parseExtension(e.arc.text(buildFileEntry(e.arc)), e.name);
         if (this.model.palette) applyExtension(this.model.palette, ext);
         applyExtensionBoards(this.model.maps, ext);
+        this.model.predefinedSetups.push(...ext.predefinedSetups);
         for (const [k, v] of ext.prototypes) this.prototypes.set(k, v);
       } catch (err) {
         console.error("extension load failed:", e.name, err);
@@ -169,6 +172,7 @@ class App {
     }
     applyPredefinedSetupBoards(this.model.maps, this.model.predefinedSetups, modules[0].arc);
     setPrototypes(this.prototypes);
+    setGlobalProperties(this.model.globalProperties);
 
     // New-game setup: instantiate each map's DrawPile decks and place its
     // SetupStack pieces (many modules keep their whole counter mix here).
@@ -179,8 +183,10 @@ class App {
         for (const slot of ss.slots) {
           try {
             const piece = buildPiece(slot.def);
-            piece.x = ss.x;
-            piece.y = ss.y;
+            // Java SetupStack.setup: position translates by the owning
+            // board's origin, which is the map's edge buffer.
+            piece.x = ss.x + (m.edgeWidth ?? 0);
+            piece.y = ss.y + (m.edgeHeight ?? 0);
             piece.mapId = m.name;
             piece.paletteCategory = slot.category ?? null;
             st.pieces.push(piece);
@@ -367,7 +373,7 @@ class App {
       onMoved: (p, from, to) => this.chatter.add(`${p.name()} moves ${from} -> ${to} *`),
     });
     this.map.setPieceScale(this.pieceScale);
-    this.toolbar.setScenarios(this.scenarioSetups().map((s) => ({ name: s.name, file: s.file })));
+    this.toolbar.setScenarios(this.scenarioSetups());
     this.switchMap(this.currentMap);
 
     installKeymap({
@@ -463,6 +469,15 @@ class App {
       diceButtons: () => this.model.diceButtons.map((b) => ({ ...b })),
       cardDecks: () => this.cardDecks.map((d) => ({ id: d.id, name: d.name, count: d.remaining.length, total: d.slots.length })),
       decks: () => this.stateFor(this.currentMap).decks.map((d) => ({ id: d.id, name: d.def.name, count: d.remaining.length, x: d.def.x, y: d.def.y, faceDown: d.faceDown })),
+      labelDebug: () => {
+        const p = this.map.getSelected();
+        if (!p) return "no-selection";
+        const views = p.labelViews().map((v) => ({ html: v.html ? v.html.length : 0, text: v.text ? v.text.length : 0, placement: v.placement }));
+        const v = p.labelViews().find((vv) => vv.html);
+        if (!v?.html) return { views };
+        const e = htmlLabelImage(v.html, () => this.map.requestDraw());
+        return { views, entry: e ? { ready: e.ready, w: e.width, h: e.height } : null };
+      },
       deckDraw: (id: string) => this.deckDraw(id) != null,
       moveSelectedToMap: (name: string) => {
         const m = this.model.maps.find((mm) => mm.name === name || mm.buttonName === name);
@@ -543,7 +558,7 @@ class App {
       gridPresent: () => this.map.grid() != null,
       hexCenter: (hex: string) => {
         try {
-          return this.map.grid()?.getLocation(hex) ?? null;
+          return this.map.hexCenter(hex);
         } catch {
           return null;
         }
@@ -735,6 +750,8 @@ class App {
     this.map.setBoardDefs(m.boards);
     this.map.setLayerOrder(m.layerOrder);
     this.map.setLosThread(m.losThread ?? null);
+    this.map.setStackMetrics(m.stackMetrics ?? null);
+    this.map.setBoardOrigin(m.edgeWidth ?? 0, m.edgeHeight ?? 0);
     this.map.setPieces(state.pieces);
     this.map.setBoard(state.boardImage);
     this.applyBoardGrid(state.boardImage);
@@ -742,12 +759,17 @@ class App {
     // A save import can select a lazy board archive that was never fetched.
     const board = state.boardImage ? m.boards.find((b) => boardKey(b) === state.boardImage) : null;
     if (board?.archiveFile && !board.image) void this.loadBoardArchive(board, state.boardImage!);
+    else if (board?.tiles?.some((t) => t.archiveFile && !t.image)) void this.loadBoardTileArchives(board, state.boardImage!);
   }
 
   private setCurrentBoard(imageName: string | null): void {
     const board = imageName ? this.currentMap.boards.find((b) => boardKey(b) === imageName) : null;
     if (board?.archiveFile && !board.image) {
       void this.loadBoardArchive(board, imageName!);
+      return;
+    }
+    if (board?.tiles?.some((t) => t.archiveFile && !t.image)) {
+      void this.loadBoardTileArchives(board, imageName!);
       return;
     }
     const state = this.stateFor(this.currentMap);
@@ -761,6 +783,40 @@ class App {
   private applyBoardGrid(imageName: string | null): void {
     const board = imageName ? this.currentMap.boards.find((b) => boardKey(b) === imageName) : null;
     this.map.setGrid(board?.grid ? new HexGridModel(board.grid) : null);
+  }
+
+  /**
+   * Multi-board `bd` layout: fetch every tile's board archive, then anchor
+   * the first tile's grid over the whole layout — geomorphic boards tile
+   * exactly (1800px = 32 columns, 645px = 10 rows), so one grid snaps every
+   * cell; cropped tiles drift at the seam (known simplification).
+   */
+  private async loadBoardTileArchives(board: BoardDef, key: string): Promise<void> {
+    if (this.loadingBoards.has(key)) return;
+    this.loadingBoards.add(key);
+    this.chatter.add(`Loading boards ${board.name}…`);
+    try {
+      let grid: BoardDef["grid"];
+      for (const tile of board.tiles ?? []) {
+        if (!tile.archiveFile || tile.image) continue;
+        const local = this.localBoardFiles.get(tile.archiveFile);
+        if (!local && !this.boardsUrl) continue;
+        const bytes = local ?? (await fetchBytes(new URL(tile.archiveFile, this.boardsUrl!).toString()));
+        const arc = await ModuleArchive.open(bytes);
+        const info = parseBoardArchive(arc, tile.archiveFile);
+        this.archives.push(arc);
+        tile.image = info.imageEntry;
+        grid ??= info.grid;
+      }
+      this.images.clearMissing();
+      if (grid && !board.grid) board.grid = grid;
+      this.chatter.add(`Boards ready (${board.name}).`);
+      this.setCurrentBoard(key);
+    } catch (err) {
+      this.chatter.add(`Failed to load boards ${board.name}: ${err instanceof Error ? err.message : err}`);
+    } finally {
+      this.loadingBoards.delete(key);
+    }
   }
 
   /**
@@ -976,10 +1032,12 @@ class App {
               d.topPiece = null;
             }
           }
+          // DrawPile subclasses SetupStack: positions offset by the edge
+          // buffer (owning-board origin) like at-start stacks.
           return {
             id: d.id,
-            x: d.def.x,
-            y: d.def.y,
+            x: d.def.x + (this.currentMap.edgeWidth ?? 0),
+            y: d.def.y + (this.currentMap.edgeHeight ?? 0),
             w: d.def.width || 72,
             h: d.def.height || 72,
             count: d.remaining.length,
@@ -1015,8 +1073,8 @@ class App {
       console.error("deck draw failed:", deck.def.name, err);
       return null;
     }
-    piece.x = atX ?? deck.def.x + (deck.def.width || 72);
-    piece.y = atY ?? deck.def.y;
+    piece.x = atX ?? deck.def.x + (this.currentMap.edgeWidth ?? 0) + (deck.def.width || 72);
+    piece.y = atY ?? deck.def.y + (this.currentMap.edgeHeight ?? 0);
     piece.mapId = this.currentMap.name;
     piece.paletteCategory = slot.category ?? null;
     this.map.addPiece(piece);
@@ -1136,11 +1194,11 @@ class App {
   }
 
   /** Playable predefined setups: non-menu, file-backed, present in an archive. */
-  private scenarioSetups(): { name: string; file: string }[] {
+  private scenarioSetups(): { name: string; file: string; menu: string }[] {
     return this.model.predefinedSetups
       .filter((s) => !s.isMenu && s.useFile && s.file)
       .filter((s) => this.archives.some((a) => a.hasEntry(s.file)))
-      .map((s) => ({ name: s.name, file: s.file }));
+      .map((s) => ({ name: s.name, file: s.file, menu: s.menu.filter(Boolean).join(" / ") }));
   }
 
   /** Load a predefined-setup scenario: a full `.vsav` embedded in the module. */

@@ -1,10 +1,11 @@
 import { SequenceDecoder } from "../../vmod/sequence";
-import type { GamePiece, KeyCommand, Trait } from "../piece";
+import type { GamePiece, KeyCommand, LabelPlacement, Trait } from "../piece";
 import { parseKeyStroke, type KeyStroke } from "../keystroke";
 
 /** Block-level tags become line breaks, other tags drop, entities decode. */
 export function htmlLabelToText(html: string): string {
   return html
+    .replace(/<(?:style|script)[^>]*>[\s\S]*?<\/(?:style|script)>/gi, "")
     .replace(/<(?:br|\/p|\/div|\/tr|\/li|\/h[1-6])[^>]*>/gi, "\n")
     .replace(/<[^>]*>/g, "")
     .replace(/&nbsp;/gi, " ")
@@ -29,12 +30,34 @@ export class Labeler implements Trait {
   private menuCommand = "Change Label";
   private key: KeyStroke | null = null;
   private label = "";
+  private placement: LabelPlacement | null = null;
+  private propertyName = "TextLabel";
 
   constructor(type: string) {
     const st = new SequenceDecoder(type.substring(this.id.length), ";");
     this.key = parseKeyStroke(st.nextTokenOr("")); // labelKey
     this.menuCommand = st.nextTokenOr("Change Label");
-    // remaining styling fields not rendered
+    st.nextInt(10); // fontSize
+    st.nextTokenOr(""); // textBg
+    st.nextTokenOr(""); // textFg
+    // Anchor fields (Java Labeler.getLabelPosition); defaults mirror Java.
+    this.placement = {
+      vPos: st.nextTokenOr("t"),
+      vOff: st.nextInt(0),
+      hPos: st.nextTokenOr("c"),
+      hOff: st.nextInt(0),
+      vJust: st.nextTokenOr("b"),
+      hJust: st.nextTokenOr("c"),
+    };
+    st.nextTokenOr(""); // nameFormat
+    st.nextTokenOr(""); // fontFamily
+    st.nextInt(0); // fontStyle
+    st.nextInt(0); // rotateDegrees
+    this.propertyName = st.nextTokenOr("TextLabel");
+  }
+
+  labelPlacement(): LabelPlacement | null {
+    return this.placement;
   }
 
   setState(s: string): void {
@@ -46,14 +69,20 @@ export class Labeler implements Trait {
 
   labelText(): string | null {
     if (!this.label) return null;
-    // Swing renders JLabel text starting with "<html>" as HTML (modules use
-    // this for styled scenario-setup labels). We draw plain text, so
-    // convert instead of showing raw markup.
+    // Swing renders JLabel text starting with "<html>" as HTML (modules build
+    // whole scenario cards this way). The renderer rasterizes htmlLabel();
+    // this text form is the fallback when rasterization is unavailable.
     return /^\s*<html/i.test(this.label) ? htmlLabelToText(this.label) : this.label;
   }
 
+  /** Raw markup when the label is Swing-HTML (rendered as real HTML). */
+  htmlLabel(): string | null {
+    return /^\s*<html/i.test(this.label) ? this.label : null;
+  }
+
   getProperty(key: string): string | null {
-    if (key === "LabelText") return this.label;
+    // Raw (unsubstituted) label, so a $label$ ref can't recurse.
+    if (key === "LabelText" || key === "label" || key === this.propertyName) return this.label;
     return null;
   }
 

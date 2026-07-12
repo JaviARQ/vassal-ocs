@@ -47,7 +47,7 @@ describe("ASLBoardPicker bd command", () => {
     expect(
       parseBdBoardCommand("bd\t0\t0\ty\t0\t0\t1181\t-1\tVER\t6.0\tbd\t0\t1\tBlank0\tVER\t6.0\tbd\t1\t0\tBlank1\tVER\t6.0\t"),
     ).toEqual([
-      { col: 0, row: 0, boardName: "y", reversed: false },
+      { col: 0, row: 0, boardName: "y", reversed: false, crop: { x1: 0, y1: 0, x2: 1181, y2: -1 } },
       { col: 0, row: 1, boardName: "Blank0", reversed: false },
       { col: 1, row: 0, boardName: "Blank1", reversed: false },
     ]);
@@ -123,14 +123,15 @@ describe.skipIf(!HAVE)("legacy-era save fixture (legacy-save.vsav)", () => {
     expect(state.preservedCommands.every((c) => !c.startsWith("bd\t"))).toBe(true);
     expect(state.notes.scenario).toContain(exp.scenarioContains);
 
-    // Re-export restores the board through ASLBoardPicker's own format.
+    // Re-export restores the board through ASLBoardPicker's own format —
+    // the original command verbatim, so crop/VER/filler tokens survive.
     const out = buildVassalSaveText({
       model,
       mapStates: state.mapStates,
       preservedCommands: state.preservedCommands,
       notes: state.notes,
     });
-    expect(out.split("\x1b")).toContain(`bd\t0\t0\t${exp.boardImage.replace(/^bd/, "")}\t`);
+    expect(out.split("\x1b").some((c) => c.startsWith(`bd\t0\t0\t${exp.boardImage.replace(/^bd/, "")}\t`))).toBe(true);
 
     // And the re-exported text imports back to the same table.
     const again = importVassalSaveText(out, model);

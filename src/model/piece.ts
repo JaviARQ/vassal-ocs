@@ -1,5 +1,7 @@
 import { strokesEqual, type KeyStroke } from "./keystroke";
 import type { SlotCategory } from "../vmod/buildfile";
+import { substituteProperties } from "../vmod/expression";
+import { getGlobalProperty } from "./globals";
 
 /**
  * A piece spawn requested by a PlaceMarker/Replace/PlaceDM trait. `spec` is
@@ -13,6 +15,20 @@ export interface PendingPlacement {
   dy: number;
   /** True when this placement replaces the requesting piece (Replace trait). */
   replaceSelf: boolean;
+}
+
+/**
+ * Where a Labeler anchors its label relative to the piece (Java
+ * Labeler.getLabelPosition): position chars 't'/'b'/'c' + offsets, then
+ * justification of the label box against that point.
+ */
+export interface LabelPlacement {
+  vPos: string;
+  vOff: number;
+  hPos: string;
+  hOff: number;
+  vJust: string;
+  hJust: string;
 }
 
 /** A menu/keyboard action contributed by a trait. */
@@ -81,6 +97,12 @@ export interface Trait {
   layerImages?(): LayerImage[];
   /** Labeler: text to draw. */
   labelText?(): string | null;
+  /** Labeler: raw markup when the label is Swing-HTML. */
+  htmlLabel?(): string | null;
+  /** Labeler: where the label anchors relative to the piece. */
+  labelPlacement?(): LabelPlacement | null;
+  /** Immobilized: piece ignores the map grid when moved ('g' option). */
+  ignoresGrid?(): boolean;
   /** Immobilized(neverMove): trait pins the piece in place. */
   immobile?(): boolean;
   /** Mark When Moved / Movement Trail support. */
@@ -133,8 +155,9 @@ export class GamePiece {
       }
     }
     if (key === "Moved") return this.movedStatus() ? "true" : "false";
-    if (key === "BasicName" || key === "PieceName") return this.name();
-    return null;
+    if (key === "BasicName" || key === "PieceName" || key === "pieceName") return this.name();
+    // Module GlobalProperties resolve after every trait (static values only).
+    return getGlobalProperty(key);
   }
 
   name(): string {
@@ -180,9 +203,43 @@ export class GamePiece {
     const out: string[] = [];
     for (const t of this.traits) {
       const s = t.labelText?.();
-      if (s) out.push(s);
+      if (s) out.push(this.substitute(s));
     }
     return out;
+  }
+
+  /** Label text is a FormattedString: $property$ refs resolve on the piece. */
+  private substitute(text: string): string {
+    if (!text.includes("$")) return text;
+    return substituteProperties(text, (key) => this.getProperty(key));
+  }
+
+  /** Per-label view: raw HTML when Swing-HTML, plus the plain-text fallback. */
+  labelViews(): Array<{ html: string | null; text: string | null; placement: LabelPlacement | null }> {
+    const out: Array<{ html: string | null; text: string | null; placement: LabelPlacement | null }> = [];
+    for (const t of this.traits) {
+      if (!t.labelText && !t.htmlLabel) continue;
+      const html = t.htmlLabel?.();
+      const text = t.labelText?.();
+      if (html || text) {
+        out.push({
+          html: html ? this.substitute(html) : null,
+          text: text ? this.substitute(text) : null,
+          placement: t.labelPlacement?.() ?? null,
+        });
+      }
+    }
+    return out;
+  }
+
+  /** True when any label is Swing-HTML (scenario cards / rule aids). */
+  hasHtmlLabel(): boolean {
+    return this.traits.some((t) => t.htmlLabel?.());
+  }
+
+  /** Immobilized 'g': the piece never snaps to the grid. */
+  ignoresGrid(): boolean {
+    return this.traits.some((t) => t.ignoresGrid?.());
   }
 
   /** The `Layer` property value (drives z-order via LayeredPieceCollection). */

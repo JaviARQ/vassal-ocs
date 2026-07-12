@@ -164,18 +164,31 @@ export class Toolbar {
     if (maps[0]) this.setBoards(maps[0]);
   }
 
-  setScenarios(list: Array<{ name: string; file: string }>): void {
+  setScenarios(list: Array<{ name: string; file: string; menu?: string }>): void {
     this.scenarioSelect.innerHTML = "";
     this.scenarioWrap.style.display = list.length ? "" : "none";
     const none = document.createElement("option");
     none.value = "";
     none.textContent = "(choose)";
     this.scenarioSelect.appendChild(none);
+    // Group by the module's setup-menu hierarchy (scenario books/series).
+    const groups = new Map<string, HTMLElement>();
     for (const s of list) {
+      let parent: HTMLElement = this.scenarioSelect;
+      if (s.menu) {
+        let g = groups.get(s.menu);
+        if (!g) {
+          g = document.createElement("optgroup");
+          (g as HTMLOptGroupElement).label = s.menu;
+          groups.set(s.menu, g);
+          this.scenarioSelect.appendChild(g);
+        }
+        parent = g;
+      }
       const opt = document.createElement("option");
       opt.value = s.file;
       opt.textContent = s.name;
-      this.scenarioSelect.appendChild(opt);
+      parent.appendChild(opt);
     }
   }
 

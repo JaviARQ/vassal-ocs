@@ -22,6 +22,11 @@ import {
 export type { ChartNodeDef, GlobalMapDef, ToolbarItemDef, TurnTrackerDef, TurnLevelDef, ZoomerDef };
 
 export interface BoardDef {
+  /**
+   * Visible sub-rectangle of the board image (ASLBoard crop bounds from a
+   * save's `bd` command). Zero width/height = to the image edge.
+   */
+  crop?: { x: number; y: number; width: number; height: number };
   id?: string;
   name: string;
   image: string;
@@ -31,6 +36,9 @@ export interface BoardDef {
   archiveFile?: string;
   /** Hex grid, from the buildFile or the board archive once loaded. */
   grid?: HexGridDef;
+  /** Raw ASLBoardPicker `bd` command this layout came from (re-exported
+   *  verbatim so crop/VER/overlay tokens survive the round-trip). */
+  bdCommand?: string;
   /** Imageless boards (Java Board): a width×height rectangle of solid color. */
   width?: number;
   height?: number;
@@ -41,8 +49,15 @@ export interface BoardDef {
 export interface BoardTileDef {
   boardName: string;
   image: string;
+  /** Layout cell indices (column, row), not pixels. */
   x: number;
   y: number;
+  /** ASLBoard reversal: the tile draws rotated 180°. */
+  reversed?: boolean;
+  /** Origin-anchored crop of the tile image. Zero = to the edge. */
+  crop?: { x: number; y: number; width: number; height: number };
+  /** Lazy board archive backing this tile, when boards ship separately. */
+  archiveFile?: string;
 }
 
 /**
@@ -62,12 +77,33 @@ export interface LosThreadDef {
   round: "up" | "down" | "nearest";
 }
 
+/**
+ * Stock `StackMetrics` (VASSAL/build/module/map/StackMetrics.java): how
+ * co-located pieces cascade visually. Defaults are the Java constants.
+ */
+export interface StackMetricsDef {
+  disabled: boolean;
+  unexSepX: number;
+  unexSepY: number;
+  exSepX: number;
+  exSepY: number;
+}
+
 export interface MapDef {
   /** VASSAL `mapName` — unique id of the window. */
   name: string;
   buttonName: string;
   boards: BoardDef[];
   drawPiles: DrawPileDef[];
+  /** Stack cascade metrics, when the map declares them. */
+  stackMetrics?: StackMetricsDef;
+  /**
+   * Edge buffer: blank margin around the boards. Boards (and board-relative
+   * grids/piles) anchor at this offset in map coordinates — piece positions
+   * include it (Map.setBoardBoundaries translates boards by the buffer).
+   */
+  edgeWidth?: number;
+  edgeHeight?: number;
   /** LayeredPieceCollection order; a piece's z-index = indexOf(its Layer). */
   layerOrder: string[];
   /** LOS_Thread range scale: pixels per range unit (inch). 0 = none defined. */
@@ -148,6 +184,8 @@ export interface ModuleModel {
   maps: MapDef[];
   diceButtons: DiceButtonDef[];
   predefinedSetups: PredefinedSetupDef[];
+  /** Module/map GlobalProperty initial values, by name. */
+  globalProperties: Map<string, string>;
   palette: WidgetNode | null;
   /** PrototypeDefinition name -> its `+/id/type/state` definition string. */
   prototypes: Map<string, string>;
@@ -165,6 +203,8 @@ export interface PredefinedSetupDef {
   file: string;
   isMenu: boolean;
   useFile: boolean;
+  /** Enclosing setup-menu names, outermost first (scenario books/series). */
+  menu: string[];
 }
 
 export interface DiceButtonDef {
@@ -199,6 +239,8 @@ export interface ExtensionModel {
   grafts: ExtensionGraft[];
   boardGrafts: BoardGraft[];
   prototypes: Map<string, string>;
+  /** Scenario setups the extension contributes (files live in its archive). */
+  predefinedSetups: PredefinedSetupDef[];
 }
 
 const NS = "VASSAL.build.";
@@ -212,9 +254,11 @@ const T = {
   layered: NS + "module.map.LayeredPieceCollection",
   drawPile: NS + "module.map.DrawPile",
   setupStack: NS + "module.map.SetupStack",
+  stackMetrics: NS + "module.map.StackMetrics",
   pieceWindow: NS + "module.PieceWindow",
   diceButton: NS + "module.DiceButton",
   predefinedSetup: NS + "module.PredefinedSetup",
+  globalProperty: NS + "module.properties.GlobalProperty",
   pieceSlot: NS + "widget.PieceSlot",
   cardSlot: NS + "widget.CardSlot",
   losThread: NS + "module.map.LOS_Thread",
@@ -381,6 +425,7 @@ export function parseBuildFile(xml: string): ModuleModel {
     maps,
     diceButtons: parseDiceButtons(doc),
     predefinedSetups: parsePredefinedSetups(doc),
+    globalProperties: parseGlobalProperties(doc),
     palette,
     prototypes: parsePrototypes(doc),
     toolbar: parseToolbar(root, maps),
@@ -620,7 +665,15 @@ export function parseExtension(xml: string, sourceName = ""): ExtensionModel {
     if (widgets.length) grafts.push({ target, widgets });
     if (boards.length) boardGrafts.push({ target, mapName: targetMapName(target), boards });
   }
-  return { id, name, category, grafts, boardGrafts, prototypes: parsePrototypes(doc) };
+  return {
+    id,
+    name,
+    category,
+    grafts,
+    boardGrafts,
+    prototypes: parsePrototypes(doc),
+    predefinedSetups: parsePredefinedSetups(doc),
+  };
 }
 
 /**
@@ -676,6 +729,9 @@ export function mergeModuleInto(base: ModuleModel, other: ModuleModel): void {
   for (const m of other.maps) base.maps.push(m);
   base.diceButtons.push(...other.diceButtons);
   base.predefinedSetups.push(...other.predefinedSetups);
+  for (const [k, v] of other.globalProperties) {
+    if (!base.globalProperties.has(k)) base.globalProperties.set(k, v);
+  }
   base.toolbar.push(...other.toolbar);
   base.hasDiceBot ||= other.hasDiceBot;
 }
@@ -729,6 +785,33 @@ function parseMap(mapEl: Element): MapDef {
     };
   }
 
+  // Stack cascade metrics (Java defaults when absent/short).
+  let stackMetrics: StackMetricsDef | undefined;
+  const smEl = mapEl.getElementsByTagName(T.stackMetrics)[0];
+  if (smEl) {
+    const num = (attr: string, dflt: number) => {
+      const v = Number.parseInt(smEl.getAttribute(attr) ?? "", 10);
+      return Number.isFinite(v) ? v : dflt;
+    };
+    stackMetrics = {
+      disabled: smEl.getAttribute("disabled") === "true",
+      unexSepX: num("unexSepX", 2),
+      unexSepY: num("unexSepY", 4),
+      exSepX: num("exSepX", 6),
+      exSepY: num("exSepY", 18),
+    };
+  }
+
+  // Edge buffer: edgeWidth/edgeHeight attrs, or legacy combined "edgeBuffer".
+  let edgeWidth = Number.parseInt(mapEl.getAttribute("edgeWidth") ?? "0", 10) || 0;
+  let edgeHeight = Number.parseInt(mapEl.getAttribute("edgeHeight") ?? "0", 10) || 0;
+  const edgeBuffer = mapEl.getAttribute("edgeBuffer");
+  if (edgeBuffer?.includes(",")) {
+    const [w, h] = edgeBuffer.split(",");
+    edgeWidth = Number.parseInt(w, 10) || 0;
+    edgeHeight = Number.parseInt(h, 10) || 0;
+  }
+
   return {
     name: mapEl.getAttribute("mapName") ?? mapEl.getAttribute("buttonName") ?? "Map",
     buttonName: mapEl.getAttribute("buttonName") ?? mapEl.getAttribute("mapName") ?? "Map",
@@ -737,7 +820,10 @@ function parseMap(mapEl: Element): MapDef {
     setupStacks: parseSetupStacks(mapEl),
     layerOrder,
     losScale,
+    edgeWidth,
+    edgeHeight,
     ...(losThread ? { losThread } : {}),
+    ...(stackMetrics ? { stackMetrics } : {}),
   };
 }
 
@@ -877,13 +963,30 @@ function parseDiceButton(el: Element): DiceButtonDef {
   };
 }
 
+function parseGlobalProperties(doc: Document): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const el of Array.from(doc.getElementsByTagName(T.globalProperty))) {
+    const name = el.getAttribute("name");
+    if (name) out.set(name, el.getAttribute("initialValue") ?? "");
+  }
+  return out;
+}
+
 function parsePredefinedSetups(doc: Document): PredefinedSetupDef[] {
-  return Array.from(doc.getElementsByTagName(T.predefinedSetup)).map((el) => ({
-    name: el.getAttribute("name") ?? "",
-    file: el.getAttribute("file") ?? "",
-    isMenu: el.getAttribute("isMenu") === "true",
-    useFile: el.getAttribute("useFile") === "true",
-  }));
+  return Array.from(doc.getElementsByTagName(T.predefinedSetup)).map((el) => {
+    // Menu hierarchy: PredefinedSetup menus nest their child setups.
+    const menu: string[] = [];
+    for (let p = el.parentElement; p; p = p.parentElement) {
+      if (p.tagName === T.predefinedSetup) menu.unshift(p.getAttribute("name") ?? "");
+    }
+    return {
+      name: el.getAttribute("name") ?? "",
+      file: el.getAttribute("file") ?? "",
+      isMenu: el.getAttribute("isMenu") === "true",
+      useFile: el.getAttribute("useFile") === "true",
+      menu,
+    };
+  });
 }
 
 function parseWidget(el: Element, category?: SlotCategory, source?: string): WidgetNode {
