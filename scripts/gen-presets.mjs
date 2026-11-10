@@ -12,9 +12,10 @@
  */
 import { readdirSync, readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { unzipSync } from "fflate";
 
-const MODULES = new URL("../public/modules/", import.meta.url).pathname;
+const MODULES = fileURLToPath(new URL("../public/modules/", import.meta.url));
 const OUT = join(MODULES, "presets.json");
 
 let presets = [];
