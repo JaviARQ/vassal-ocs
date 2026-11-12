@@ -1179,7 +1179,7 @@ class App {
   private pickAndLoadGame(): void {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = ".vsav,application/x-vassal-save,application/zip";
+    // input.accept = ".vsav,application/x-vassal-save,application/zip"; // iOS greys out .vsav — removed filter
     input.addEventListener("change", async () => {
       const file = input.files?.[0];
       if (!file) return;
